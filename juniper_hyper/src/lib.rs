@@ -15,6 +15,11 @@ use serde_json::error::Error as SerdeError;
 use std::{error::Error, fmt, string::FromUtf8Error, sync::Arc};
 use url::form_urlencoded;
 
+enum Format {
+    Json,
+    GraphQL,
+}
+
 pub async fn graphql<CtxT, QueryT, MutationT, SubscriptionT, S>(
     root_node: Arc<RootNode<'static, QueryT, MutationT, SubscriptionT, S>>,
     context: Arc<CtxT>,
@@ -40,7 +45,7 @@ where
             }
         }
         Method::POST => {
-            let gql_req = parse_post_req(request.into_body()).await;
+            let gql_req = parse_post_req(request).await;
 
             match gql_req {
                 Ok(gql_req) => Ok(execute_request(root_node, context, gql_req).await),
@@ -76,7 +81,7 @@ where
             }
         }
         Method::POST => {
-            let gql_req = parse_post_req(request.into_body()).await;
+            let gql_req = parse_post_req(request).await;
 
             match gql_req {
                 Ok(gql_req) => Ok(execute_request_async(root_node, context, gql_req).await),
@@ -101,8 +106,16 @@ fn parse_get_req<S: ScalarValue>(
 }
 
 async fn parse_post_req<S: ScalarValue>(
-    body: Body,
+    req: Request<Body>,
 ) -> Result<GraphQLBatchRequest<S>, GraphQLRequestError> {
+    let graphql_header_value = HeaderValue::from_static("application/graphql");
+    let format = match req.headers().get(header::CONTENT_TYPE) {
+        Some(v) if v == graphql_header_value => Format::GraphQL,
+        _ => Format::Json, // retain old behaviour; default to JSON.
+    };
+
+    let body = req.into_body();
+
     let chunk = hyper::body::to_bytes(body)
         .await
         .map_err(GraphQLRequestError::BodyHyper)?;
@@ -110,8 +123,14 @@ async fn parse_post_req<S: ScalarValue>(
     let input = String::from_utf8(chunk.iter().cloned().collect())
         .map_err(GraphQLRequestError::BodyUtf8)?;
 
-    serde_json::from_str::<GraphQLBatchRequest<S>>(&input)
-        .map_err(GraphQLRequestError::BodyJSONError)
+    match format {
+        Format::Json => serde_json::from_str::<GraphQLBatchRequest<S>>(&input)
+            .map_err(GraphQLRequestError::BodyJSONError),
+        Format::GraphQL => {
+            let inner = juniper::http::GraphQLRequest::new(input, None, None);
+            Ok(GraphQLBatchRequest::Single(inner))
+        }
+    }
 }
 
 pub async fn graphiql(
@@ -327,12 +346,19 @@ mod tests {
             make_test_response(reqwest::get(&url).expect(&format!("failed GET {}", url)))
         }
 
-        fn post(&self, url: &str, body: &str) -> http_tests::TestResponse {
+        fn post(
+            &self,
+            url: &str,
+            body: &str,
+            content_type: Option<&str>,
+        ) -> http_tests::TestResponse {
+            let content_type = content_type.unwrap_or("application/json");
             let url = format!("http://127.0.0.1:3001/graphql{}", url);
             let client = reqwest::Client::new();
             let res = client
                 .post(&url)
                 .body(body.to_string())
+                .header(reqwest::header::CONTENT_TYPE, content_type)
                 .send()
                 .expect(&format!("failed POST {}", url));
             make_test_response(res)

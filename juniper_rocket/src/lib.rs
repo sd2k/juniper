@@ -265,6 +265,11 @@ where
     }
 }
 
+enum Format {
+    Json,
+    GraphQL,
+}
+
 impl<S> FromDataSimple for GraphQLRequest<S>
 where
     S: ScalarValue,
@@ -272,18 +277,26 @@ where
     type Error = String;
 
     fn from_data(request: &Request, data: Data) -> FromDataOutcome<Self, Self::Error> {
-        if !request.content_type().map_or(false, |ct| ct.is_json()) {
-            return Forward(data);
-        }
+        let format = match request.content_type() {
+            Some(ct) if ct.is_json() => Format::Json,
+            Some(ct) if ct.top() == "application" && ct.sub() == "graphql" => Format::GraphQL,
+            _ => return Forward(data),
+        };
 
         let mut body = String::new();
         if let Err(e) = data.open().read_to_string(&mut body) {
             return Failure((Status::InternalServerError, format!("{:?}", e)));
         }
 
-        match serde_json::from_str(&body) {
-            Ok(value) => Success(GraphQLRequest(value)),
-            Err(failure) => Failure((Status::BadRequest, format!("{}", failure))),
+        match format {
+            Format::Json => match serde_json::from_str(&body) {
+                Ok(value) => Success(GraphQLRequest(value)),
+                Err(failure) => Failure((Status::BadRequest, failure.to_string())),
+            },
+            Format::GraphQL => {
+                let inner = juniper::http::GraphQLRequest::new(body, None, None);
+                Success(GraphQLRequest(GraphQLBatchRequest::Single(inner)))
+            }
         }
     }
 }
@@ -417,6 +430,8 @@ mod fromform_tests {
 #[cfg(test)]
 mod tests {
 
+    use std::str::FromStr;
+
     use rocket::{
         self, get,
         http::ContentType,
@@ -462,9 +477,17 @@ mod tests {
             make_test_response(req)
         }
 
-        fn post(&self, url: &str, body: &str) -> http_tests::TestResponse {
-            let req = &self.client.post(url).header(ContentType::JSON).body(body);
-            make_test_response(req)
+        fn post(
+            &self,
+            url: &str,
+            body: &str,
+            content_type: Option<&str>,
+        ) -> http_tests::TestResponse {
+            let content_type = content_type
+                .map(|ct| ContentType::from_str(ct).unwrap())
+                .unwrap_or(ContentType::JSON);
+            let req = self.client.post(url).header(content_type).body(body);
+            make_test_response(&req)
         }
     }
 
@@ -497,6 +520,22 @@ mod tests {
             .post("/")
             .header(ContentType::JSON)
             .body(r#"{"query": "query TestQuery {hero{name}}", "operationName": "TestQuery"}"#);
+        let resp = make_test_response(&req);
+
+        assert_eq!(resp.status_code, 200);
+    }
+
+    #[test]
+    fn test_application_graphql_content_type() {
+        use std::str::FromStr;
+
+        let rocket = make_rocket();
+        let client = Client::new(rocket).expect("valid rocket");
+
+        let req = client
+            .post("/")
+            .header(ContentType::from_str("application/graphql").unwrap())
+            .body("{hero{name}}");
         let resp = make_test_response(&req);
 
         assert_eq!(resp.status_code, 200);

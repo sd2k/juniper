@@ -288,6 +288,11 @@ where
 
 const BODY_LIMIT: u64 = 1024 * 100;
 
+enum Format {
+    Json,
+    GraphQL,
+}
+
 impl<S> FromDataSimple for GraphQLRequest<S>
 where
     S: ScalarValue + Send + Sync,
@@ -296,6 +301,12 @@ where
 
     fn from_data(request: &Request, data: Data) -> FromDataFuture<'static, Self, Self::Error> {
         use tokio::io::AsyncReadExt as _;
+
+        let format = match request.content_type() {
+            Some(ct) if ct.is_json() => Format::Json,
+            Some(ct) if ct.top() == "application" && ct.sub() == "graphql" => Format::GraphQL,
+            _ => return Box::pin(async move { Forward(data) }),
+        };
 
         if !request.content_type().map_or(false, |ct| ct.is_json()) {
             return Box::pin(async move { Forward(data) });
@@ -308,9 +319,15 @@ where
                 return Failure((Status::InternalServerError, format!("{:?}", e)));
             }
 
-            match serde_json::from_str(&body) {
-                Ok(value) => Success(GraphQLRequest(value)),
-                Err(failure) => Failure((Status::BadRequest, format!("{}", failure))),
+            match format {
+                Format::Json => match serde_json::from_str(&body) {
+                    Ok(value) => Success(GraphQLRequest(value)),
+                    Err(failure) => Failure((Status::BadRequest, failure.to_string())),
+                },
+                Format::GraphQL => {
+                    let inner = juniper::http::GraphQLRequest::new(body, None, None);
+                    Success(GraphQLRequest(GraphQLBatchRequest::Single(inner)))
+                }
             }
         })
     }

@@ -357,7 +357,7 @@ pub mod tests {
     /// integration we are testing.
     pub trait HTTPIntegration {
         fn get(&self, url: &str) -> TestResponse;
-        fn post(&self, url: &str, body: &str) -> TestResponse;
+        fn post(&self, url: &str, body: &str, content_type: Option<&str>) -> TestResponse;
     }
 
     #[allow(missing_docs)]
@@ -378,6 +378,9 @@ pub mod tests {
 
         println!("  - test_batched_post");
         test_batched_post(integration);
+
+        println!("  - test_graphql_post");
+        test_graphql_post(integration);
 
         println!("  - test_invalid_json");
         test_invalid_json(integration);
@@ -475,7 +478,7 @@ pub mod tests {
     }
 
     fn test_simple_post<T: HTTPIntegration>(integration: &T) {
-        let response = integration.post("/", r#"{"query": "{hero{name}}"}"#);
+        let response = integration.post("/", r#"{"query": "{hero{name}}"}"#, None);
 
         assert_eq!(response.status_code, 200);
         assert_eq!(response.content_type, "application/json");
@@ -491,6 +494,7 @@ pub mod tests {
         let response = integration.post(
             "/",
             r#"[{"query": "{hero{name}}"}, {"query": "{hero{name}}"}]"#,
+            None,
         );
 
         assert_eq!(response.status_code, 200);
@@ -505,10 +509,23 @@ pub mod tests {
         );
     }
 
+    fn test_graphql_post<T: HTTPIntegration>(integration: &T) {
+        let response = integration.post("/", "{hero{name}}", Some("application/graphql"));
+
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.content_type, "application/json");
+
+        assert_eq!(
+            unwrap_json_response(&response),
+            serde_json::from_str::<Json>(r#"{"data": {"hero": {"name": "R2-D2"}}}"#)
+                .expect("Invalid JSON constant in test")
+        );
+    }
+
     fn test_invalid_json<T: HTTPIntegration>(integration: &T) {
         let response = integration.get("/?query=blah");
         assert_eq!(response.status_code, 400);
-        let response = integration.post("/", r#"blah"#);
+        let response = integration.post("/", r#"blah"#, None);
         assert_eq!(response.status_code, 400);
     }
 
@@ -516,7 +533,7 @@ pub mod tests {
         // {hero{blah}}
         let response = integration.get("/?query=%7Bhero%7Bblah%7D%7D");
         assert_eq!(response.status_code, 400);
-        let response = integration.post("/", r#"{"query": "{hero{blah}}"}"#);
+        let response = integration.post("/", r#"{"query": "{hero{blah}}"}"#, None);
         assert_eq!(response.status_code, 400);
     }
 
@@ -529,6 +546,7 @@ pub mod tests {
             r#"
             {"query": "{hero{name}}", "query": "{hero{name}}"}
         "#,
+            None,
         );
         assert_eq!(response.status_code, 400);
     }

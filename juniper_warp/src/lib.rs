@@ -192,7 +192,7 @@ where
     let post_schema = schema.clone();
 
     let handle_post_request =
-        move |context: Context, request: GraphQLBatchRequest<S>| -> Response {
+        move |(context, request): (Context, GraphQLBatchRequest<S>)| -> Response {
             let schema = post_schema.clone();
 
             Box::pin(
@@ -209,9 +209,32 @@ where
             )
         };
 
-    let post_filter = warp::post()
+    let post_graphql_filter = warp::post()
         .and(context_extractor.clone())
+        .and(warp::header::exact_ignore_case(
+            "content-type",
+            "application/graphql",
+        ))
+        .and(warp::body::bytes())
+        .and_then(|ctx: Context, bytes: bytes::Bytes| async move {
+            match String::from_utf8(bytes.into_iter().collect()) {
+                Ok(s) => {
+                    let inner = juniper::http::GraphQLRequest::new(s, None, None);
+                    Ok((ctx, GraphQLBatchRequest::Single(inner)))
+                }
+                Err(e) => Err(warp::reject::custom(Utf8Error(e)))?,
+            }
+        })
+        .and_then(handle_post_request);
+
+    let post_json_filter = warp::post()
+        .and(context_extractor.clone())
+        .and(warp::header::exact_ignore_case(
+            "content-type",
+            "application/json",
+        ))
         .and(warp::body::json())
+        .map(|ctx, body| (ctx, body))
         .and_then(handle_post_request);
 
     let handle_get_request = move |context: Context,
@@ -251,8 +274,18 @@ where
         .and(warp::filters::query::query())
         .and_then(handle_get_request);
 
-    get_filter.or(post_filter).unify().boxed()
+    get_filter
+        .or(post_json_filter)
+        .unify()
+        .or(post_graphql_filter)
+        .unify()
+        .boxed()
 }
+
+#[derive(Debug)]
+pub struct Utf8Error(std::string::FromUtf8Error);
+
+impl warp::reject::Reject for Utf8Error {}
 
 /// Error raised by `tokio_threadpool` if the thread pool
 /// has been shutdown

@@ -114,7 +114,9 @@ extern crate iron_test;
 #[cfg(test)]
 extern crate url;
 
-use iron::{itry, method, middleware::Handler, mime::Mime, prelude::*, status};
+use iron::{
+    headers::ContentType, itry, method, middleware::Handler, mime::Mime, prelude::*, status,
+};
 use urlencoded::{UrlDecodingError, UrlEncodedQuery};
 
 use std::{error::Error, fmt, io::Read};
@@ -248,10 +250,17 @@ where
         let mut request_payload = String::new();
         itry!(req.body.read_to_string(&mut request_payload));
 
-        Ok(
-            serde_json::from_str::<GraphQLBatchRequest<S>>(request_payload.as_str())
+        let graphql_header_value = ContentType("application/graphql".parse().unwrap());
+        let request = match req.headers.get::<iron::headers::ContentType>() {
+            Some(ct) if ct == &graphql_header_value => {
+                let inner = juniper::http::GraphQLRequest::new(request_payload, None, None);
+                GraphQLBatchRequest::Single(inner)
+            }
+            _ => serde_json::from_str::<GraphQLBatchRequest<S>>(request_payload.as_str())
                 .map_err(GraphQLIronError::Serde)?,
-        )
+        };
+
+        Ok(request)
     }
 
     fn execute_sync(
@@ -431,8 +440,18 @@ mod tests {
             }
         }
 
-        fn post(&self, url: &str, body: &str) -> http_tests::TestResponse {
-            let result = request::post(&fixup_url(url), Headers::new(), body, &make_handler());
+        fn post(
+            &self,
+            url: &str,
+            body: &str,
+            content_type: Option<&str>,
+        ) -> http_tests::TestResponse {
+            let content_type = content_type
+                .map(|ct| ContentType(ct.parse().unwrap()))
+                .unwrap_or(ContentType::json());
+            let mut headers = Headers::new();
+            headers.set(content_type);
+            let result = request::post(&fixup_url(url), headers, body, &make_handler());
             match result {
                 Ok(response) => make_test_response(response),
                 Err(e) => make_test_error_response(e),
